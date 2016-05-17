@@ -1,0 +1,8 @@
+[package]
+name = "rust_img"
+version = "0.1.0"
+authors = ["David Zmick <dpzmick@gmail.com>"]
+
+[dependencies]
+image = "*"
+num = "0.1"
