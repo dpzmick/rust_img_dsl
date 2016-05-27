@@ -20,6 +20,36 @@ trait Inputable {
     fn height(&self) -> i64;
 }
 
+struct VecInpt { v: Vec<i64> }
+
+impl VecInpt {
+    pub fn new(v: Vec<i64>) -> Self {
+        VecInpt {v: v}
+    }
+}
+
+impl Inputable for VecInpt {
+    fn at(&self, x: i64, y: i64) -> i64 {
+        if y != 0 {
+            return 0
+        }
+
+        if x < 0  || x >= (self.v.len() as i64) {
+            return 0
+        }
+
+        self.v[x as usize]
+    }
+
+    fn width(&self) -> i64 {
+        self.v.len() as i64
+    }
+
+    fn height(&self) -> i64 {
+        0
+    }
+}
+
 impl Inputable for ImageBuffer<Luma<u8>, Vec<u8>> {
     fn at(&self, x: i64, y: i64) -> i64 {
         if x < 0 || x >= self.width() as i64 {
@@ -44,15 +74,30 @@ impl Inputable for ImageBuffer<Luma<u8>, Vec<u8>> {
 }
 
 trait Eval {
-    fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64;
+    fn eval(&self, env: FunctionEnv, inpt: &Box<Inputable>) -> i64;
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ConstExpr { v: i64 }
 
 impl Eval for ConstExpr {
-    fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64 {
+    fn eval(&self, _: FunctionEnv, _: &Box<Inputable>) -> i64 {
         self.v
+    }
+}
+
+impl Add<ConstExpr> for ConstExpr {
+    type Output = AddExpr;
+    fn add(self, rhs: ConstExpr) -> AddExpr {
+        AddExpr { e1: Box::new(self), e2: Box::new(rhs) }
+    }
+}
+
+impl Mul<ConstExpr> for ConstExpr {
+    type Output = MulExpr;
+
+    fn mul(self, rhs: ConstExpr) -> MulExpr {
+        MulExpr { e1: Box::new(self), e2: Box::new(rhs) }
     }
 }
 
@@ -60,7 +105,7 @@ impl Eval for ConstExpr {
 struct VarRef { v: Var }
 
 impl Eval for VarRef {
-    fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64 {
+    fn eval(&self, env: FunctionEnv, _: &Box<Inputable>) -> i64 {
         match self.v {
             Var::X => env.x,
             Var::Y => env.y
@@ -69,26 +114,25 @@ impl Eval for VarRef {
 }
 
 impl Add<i64> for VarRef {
-    type Output = AddExpr<VarRef, ConstExpr>;
+    type Output = AddExpr;
 
-    fn add(self, rhs: i64) -> AddExpr<VarRef, ConstExpr> {
+    fn add(self, rhs: i64) -> AddExpr {
         AddExpr { e1: Box::new(self), e2: Box::new(ConstExpr { v: rhs }) }
     }
 }
 
 impl Sub<i64> for VarRef {
-    type Output = AddExpr<VarRef, ConstExpr>;
+    type Output = AddExpr;
 
-    fn sub(self, rhs: i64) -> AddExpr<VarRef, ConstExpr> {
+    fn sub(self, rhs: i64) -> AddExpr {
         AddExpr { e1: Box::new(self), e2: Box::new(ConstExpr { v: -rhs }) }
     }
 }
 
-#[derive(Debug, Clone)]
-struct AddExpr<E1: Eval, E2: Eval>{ e1: Box<E1>, e2: Box<E2> }
+struct AddExpr{ e1: Box<Eval>, e2: Box<Eval> }
 
-impl<E1: Eval, E2: Eval> Eval for AddExpr<E1, E2> {
-    fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64 {
+impl Eval for AddExpr {
+    fn eval(&self, env: FunctionEnv, inpt: &Box<Inputable>) -> i64 {
         let e1 = self.e1.eval(env.clone(), inpt);
         let e2 = self.e2.eval(env.clone(), inpt);
 
@@ -96,11 +140,10 @@ impl<E1: Eval, E2: Eval> Eval for AddExpr<E1, E2> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct MulExpr<E1: Eval, E2: Eval>{ e1: Box<E1>, e2: Box<E2> }
+struct MulExpr{ e1: Box<Eval>, e2: Box<Eval> }
 
-impl<E1: Eval, E2: Eval> Eval for MulExpr<E1, E2> {
-    fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64 {
+impl Eval for MulExpr {
+    fn eval(&self, env: FunctionEnv, inpt: &Box<Inputable>) -> i64 {
         let e1 = self.e1.eval(env.clone(), inpt);
         let e2 = self.e2.eval(env.clone(), inpt);
 
@@ -108,10 +151,10 @@ impl<E1: Eval, E2: Eval> Eval for MulExpr<E1, E2> {
     }
 }
 
-struct InputExpr<E1: Eval, E2: Eval> { x: Box<E1>, y: Box<E2> }
+struct InputExpr { x: Box<Eval>, y: Box<Eval> }
 
-impl<E1: Eval, E2: Eval> Eval for InputExpr<E1, E2> {
-    fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64 {
+impl Eval for InputExpr {
+    fn eval(&self, env: FunctionEnv, inpt: &Box<Inputable>) -> i64 {
         let x = self.x.eval(env.clone(), inpt);
         let y = self.y.eval(env.clone(), inpt);
 
@@ -120,49 +163,138 @@ impl<E1: Eval, E2: Eval> Eval for InputExpr<E1, E2> {
 }
 
 // need these defined in both directions for each type....
-impl<E1: Eval, E2: Eval> Mul<i64> for InputExpr<E1, E2> {
-    type Output = MulExpr<InputExpr<E1, E2>, ConstExpr>;
+impl Mul<i64> for InputExpr {
+    type Output = MulExpr;
 
-    fn mul(self, rhs: i64) -> MulExpr<InputExpr<E1, E2>, ConstExpr> {
+    fn mul(self, rhs: i64) -> MulExpr {
         MulExpr { e1: Box::new(self), e2: Box::new(ConstExpr { v: rhs }) }
     }
 }
 
-impl<E1: Eval, E2: Eval> Mul<InputExpr<E1, E2>> for i64 {
-    type Output = MulExpr<InputExpr<E1, E2>, ConstExpr>;
+impl Mul<InputExpr> for i64 {
+    type Output = MulExpr<>;
 
-    fn mul(self, rhs: InputExpr<E1, E2>) -> MulExpr<InputExpr<E1, E2>, ConstExpr> {
+    fn mul(self, rhs: InputExpr) -> MulExpr {
         MulExpr { e1: Box::new(rhs), e2: Box::new(ConstExpr { v: self }) }
     }
 }
 
-
-#[derive(Debug)]
-struct Function<E: Eval> {
-    e: E
+#[test]
+fn test_const() {
+    let e = ConstExpr { v: 100 };
+    let env = FunctionEnv {x:0, y:0};
+    let inpt = VecInpt::new(Vec::new());
+    let r = e.eval(env, &(Box::new(inpt) as Box<Inputable>));
+    assert!(r == 100);
 }
 
-impl<E: Eval> Function<E> {
+#[test]
+fn test_var_ref() {
+    let env = FunctionEnv { x: 0, y: 100 };
+    let inpt = Box::new(VecInpt::new(Vec::new())) as Box<Inputable>;
+
+    let e1 = VarRef { v: Var::X };
+    assert!(e1.eval(env, &inpt) == 0);
+
+    let e1 = VarRef { v: Var::Y };
+    assert!(e1.eval(env, &inpt) == 100);
+
+    // should be easy to work with
+    let e2 = e1 + 1;
+    assert!(e2.eval(env, &inpt) == 101);
+
+    let e2 = e1 + 2;
+    assert!(e2.eval(env, &inpt) == 102);
+}
+
+#[test]
+fn test_add_expr() {
+    let inpt = Box::new(VecInpt::new(Vec::new())) as Box<Inputable>;
+    let env = FunctionEnv {x:0, y:0};
+
+    let e1 = ConstExpr { v: 100 };
+    let e2 = ConstExpr { v: 100 };
+
+    let e = AddExpr { e1: Box::new(e1), e2: Box::new(e2) };
+
+    let r = e.eval(env, &inpt);
+    assert!(r == 200);
+
+    // try with overload
+    let e = e1 + e2;
+
+    let r = e.eval(env, &inpt);
+    assert!(r == 200);
+}
+
+#[test]
+fn test_mul_expr() {
+    let inpt = Box::new(VecInpt::new(Vec::new())) as Box<Inputable>;
+    let env = FunctionEnv {x:0, y:0};
+
+    let e1 = ConstExpr { v: 100 };
+    let e2 = ConstExpr { v: 100 };
+
+    let e = MulExpr { e1: Box::new(e1), e2: Box::new(e2) };
+
+    let r = e.eval(env, &inpt);
+    assert!(r == 100*100);
+
+    // try with overload
+    let e = e1 * e2;
+    let r = e.eval(env, &inpt);
+    assert!(r == 100*100);
+}
+
+#[test]
+fn test_inpt_expr() {
+    let mut vec = Vec::new();
+    vec.push(0);
+
+    let inpt = Box::new(VecInpt::new(vec)) as Box<Inputable>;
+    let env = FunctionEnv {x:0, y:0};
+
+    let x = ConstExpr { v: 0 };
+    let y = ConstExpr { v: 0 };
+    let e = InputExpr { x: Box::new(x), y: Box::new(y) };
+
+    assert!(0 == e.eval(env, &inpt));
+}
+
+struct Function {
+    e: Box<Eval>
+}
+
+impl Function {
     // TODO chaining
 
-    pub fn new<F, E1: Eval, E2: Eval>(gen: F) -> Self
-        where F : Fn(VarRef, VarRef, &Fn(E1, E2) -> InputExpr<E1, E2>) -> E,
+    pub fn new<F, E1: Eval + 'static, E2: Eval + 'static, E3: Eval + 'static>(gen: F) -> Self
+        where F : Fn(VarRef, VarRef, &Fn(E1, E2) -> InputExpr) -> E3,
     {
         let x = VarRef {v: Var::X};
         let y = VarRef {v: Var::Y};
 
-        let input = |x, y| { InputExpr { x: Box::new(x), y: Box::new(y) } };
+        let input = |x, y| {
+            InputExpr {
+                x: Box::new(x) as Box<Eval>,
+                y: Box::new(y) as Box<Eval>
+            }
+        };
 
         let e = gen(x, y, &input);
 
-        Function { e: e }
+        Function { e: Box::new(e) }
     }
 
-    pub fn eval_on<I: Inputable>(&self, inpt: I) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    pub fn eval_on<I: Inputable + 'static>(&self, inpt: I) -> ImageBuffer<Luma<u8>, Vec<u8>> {
         let mut out = ImageBuffer::new(inpt.width() as u32, inpt.height() as u32);
+        let inpt = Box::new(inpt) as Box<Inputable>;
 
-        for x in 0..inpt.width() {
-            for y in 0..inpt.height() {
+        let xbound = (*inpt).width();
+        let ybound = (*inpt).height();
+
+        for x in 0..xbound {
+            for y in 0..ybound {
                 let env = FunctionEnv {x: x, y: y};
                 let v = self.e.eval(env, &inpt);
                 let v = if v > 255 { 255 } else if v < 0 { 0 } else { v } as u8;
@@ -225,14 +357,16 @@ fn test_shift_one() {
 }
 
 fn main() {
-    let id = Function::new(|x, y, input| {
-        input(x - 10, y)
-    });
+    // let id = Function::new(|x, y, input| {
+    //     input(x - 10, y) * -1
+    // });
 
-    let inpt = image::open(&Path::new("in1.png")).unwrap();
+    // id = 10;
 
-    let out = id.eval_on(inpt.to_luma());
+    // let inpt = image::open(&Path::new("in1.png")).unwrap();
 
-    let ref mut fout = File::create(&Path::new("out.png")).unwrap();
-    let _ = image::ImageLuma8(out).save(fout, image::PNG);
+    // let out = id.eval_on(inpt.to_luma());
+
+    // let ref mut fout = File::create(&Path::new("out.png")).unwrap();
+    // let _ = image::ImageLuma8(out).save(fout, image::PNG);
 }
