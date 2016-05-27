@@ -3,10 +3,10 @@ extern crate image;
 use std::ops::Add;
 use std::ops::Mul;
 use std::ops::Sub;
+use std::fmt::Debug;
 
 use std::fs::File;
 use std::path::Path;
-use std::ops::Deref;
 use image::ImageBuffer;
 use image::Pixel;
 use image::Luma;
@@ -73,7 +73,7 @@ impl Inputable for ImageBuffer<Luma<u8>, Vec<u8>> {
     }
 }
 
-trait Eval {
+trait Eval: Debug {
     fn eval(&self, env: FunctionEnv, inpt: &Box<Inputable>) -> i64;
 }
 
@@ -129,6 +129,7 @@ impl Sub<i64> for VarRef {
     }
 }
 
+#[derive(Debug)]
 struct AddExpr{ e1: Box<Eval>, e2: Box<Eval> }
 
 impl Eval for AddExpr {
@@ -140,6 +141,23 @@ impl Eval for AddExpr {
     }
 }
 
+impl Add<AddExpr> for AddExpr {
+    type Output = AddExpr;
+
+    fn add(self, rhs: AddExpr) -> AddExpr {
+        AddExpr { e1: Box::new(self), e2: Box::new(rhs) }
+    }
+}
+
+impl Add<MulExpr> for AddExpr {
+    type Output = AddExpr;
+
+    fn add(self, rhs: MulExpr) -> AddExpr {
+        AddExpr { e1: Box::new(self), e2: Box::new(rhs) }
+    }
+}
+
+#[derive(Debug)]
 struct MulExpr{ e1: Box<Eval>, e2: Box<Eval> }
 
 impl Eval for MulExpr {
@@ -151,6 +169,15 @@ impl Eval for MulExpr {
     }
 }
 
+impl Add<MulExpr> for MulExpr {
+    type Output = AddExpr;
+
+    fn add(self, rhs: MulExpr) -> AddExpr {
+        AddExpr { e1: Box::new(self), e2: Box::new(rhs) }
+    }
+}
+
+#[derive(Debug)]
 struct InputExpr { x: Box<Eval>, y: Box<Eval> }
 
 impl Eval for InputExpr {
@@ -168,14 +195,6 @@ impl Mul<i64> for InputExpr {
 
     fn mul(self, rhs: i64) -> MulExpr {
         MulExpr { e1: Box::new(self), e2: Box::new(ConstExpr { v: rhs }) }
-    }
-}
-
-impl Mul<InputExpr> for i64 {
-    type Output = MulExpr<>;
-
-    fn mul(self, rhs: InputExpr) -> MulExpr {
-        MulExpr { e1: Box::new(rhs), e2: Box::new(ConstExpr { v: self }) }
     }
 }
 
@@ -261,6 +280,7 @@ fn test_inpt_expr() {
     assert!(0 == e.eval(env, &inpt));
 }
 
+#[derive(Debug)]
 struct Function {
     e: Box<Eval>
 }
@@ -305,6 +325,23 @@ impl Function {
 
         out
     }
+
+    pub fn gen_3x3_kernel(k: [[i64; 3]; 3]) -> Self {
+        Function::new(|x, y, input| {
+            // TODO don't want to require the + 0 everywhere...
+            // the callback gets type inferenced as a Fn(AddExpr, AddExpr)
+
+              (input(x - 1, y - 1) * k[0][0])
+            + (input(x - 1, y + 0) * k[1][0])
+            + (input(x - 1, y + 1) * k[2][0])
+            + (input(x + 0, y - 1) * k[0][1])
+            + (input(x + 0, y + 0) * k[1][1])
+            + (input(x + 0, y + 1) * k[2][1])
+            + (input(x + 1, y - 1) * k[0][2])
+            + (input(x + 1, y + 0) * k[1][2])
+            + (input(x + 1, y + 1) * k[2][2])
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -348,7 +385,6 @@ fn test_shift_one() {
     let out = shift_one.eval_on(img);
 
     let raw = out.into_raw();
-    println!("{:?}", raw);
     assert!(raw.len() == 4);
     assert!(raw[0] == 0);
     assert!(raw[1] == 0);
@@ -356,17 +392,46 @@ fn test_shift_one() {
     assert!(raw[3] == 200);
 }
 
+#[test]
+fn test_simple_sobel() {
+    let inpt = [[0, 0, 0],
+                [255, 255, 255],
+                [0, 0, 0]];
+
+    let mut raw: Vec<u8> = Vec::new();
+    for x in 0..3 {
+        for y in 0..3 {
+            raw.push(inpt[x][y]);
+        }
+    }
+
+    let img: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_raw(3, 3, raw).unwrap();
+
+    let k = [[-1, 0, 1],
+             [-2, 0, 2],
+             [-1, 0, 1]];
+    let sobel_x = Function::gen_3x3_kernel(k);
+    let out = sobel_x.eval_on(img);
+
+    let raw = out.into_raw();
+    assert!(raw.len() == 9);
+
+    let expected = [255, 0, 0, 255, 0, 0, 255, 0, 0];
+    for i in 0..9 {
+        assert!(raw[i] == expected[i]);
+    }
+}
+
 fn main() {
-    // let id = Function::new(|x, y, input| {
-    //     input(x - 10, y) * -1
-    // });
+    let inpt = image::open(&Path::new("in1.png")).unwrap();
 
-    // id = 10;
+    let sobel_x = [[-1, 0, 1],
+                   [-2, 0, 2],
+                   [-1, 0, 1]];
 
-    // let inpt = image::open(&Path::new("in1.png")).unwrap();
+    let sobel_x = Function::gen_3x3_kernel(sobel_x);
+    let out = sobel_x.eval_on(inpt.to_luma());
 
-    // let out = id.eval_on(inpt.to_luma());
-
-    // let ref mut fout = File::create(&Path::new("out.png")).unwrap();
-    // let _ = image::ImageLuma8(out).save(fout, image::PNG);
+    let ref mut fout = File::create(&Path::new("out.png")).unwrap();
+    let _ = image::ImageLuma8(out).save(fout, image::PNG);
 }
