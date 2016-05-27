@@ -22,6 +22,14 @@ trait Inputable {
 
 impl Inputable for ImageBuffer<Luma<u8>, Vec<u8>> {
     fn at(&self, x: i64, y: i64) -> i64 {
+        if x < 0 || x >= self.width() as i64 {
+            return 0
+        }
+
+        if y < 0 || y >= self.height() as i64 {
+            return 0
+        }
+
         let (px, _, _, _) = self.get_pixel(x as u32, y as u32).channels4();
         px as i64
     }
@@ -60,6 +68,14 @@ impl Eval for VarRef {
     }
 }
 
+impl Add<i64> for VarRef {
+    type Output = AddExpr<VarRef, ConstExpr>;
+
+    fn add(self, rhs: i64) -> AddExpr<VarRef, ConstExpr> {
+        AddExpr { e1: Box::new(self), e2: Box::new(ConstExpr { v: rhs }) }
+    }
+}
+
 impl Sub<i64> for VarRef {
     type Output = AddExpr<VarRef, ConstExpr>;
 
@@ -74,19 +90,19 @@ struct AddExpr<E1: Eval, E2: Eval>{ e1: Box<E1>, e2: Box<E2> }
 impl<E1: Eval, E2: Eval> Eval for AddExpr<E1, E2> {
     fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64 {
         let e1 = self.e1.eval(env.clone(), inpt);
-        let e2 = self.e1.eval(env.clone(), inpt);
+        let e2 = self.e2.eval(env.clone(), inpt);
 
         e1 + e2
     }
 }
 
 #[derive(Debug, Clone)]
-struct MulExpr<E: Eval>{ e1: Box<E>, e2: Box<E> }
+struct MulExpr<E1: Eval, E2: Eval>{ e1: Box<E1>, e2: Box<E2> }
 
-impl<E: Eval> Eval for MulExpr<E> {
+impl<E1: Eval, E2: Eval> Eval for MulExpr<E1, E2> {
     fn eval<I: Inputable>(&self, env: FunctionEnv, inpt: &I) -> i64 {
         let e1 = self.e1.eval(env.clone(), inpt);
-        let e2 = self.e1.eval(env.clone(), inpt);
+        let e2 = self.e2.eval(env.clone(), inpt);
 
         e1 * e2
     }
@@ -103,12 +119,32 @@ impl<E1: Eval, E2: Eval> Eval for InputExpr<E1, E2> {
     }
 }
 
+// need these defined in both directions for each type....
+impl<E1: Eval, E2: Eval> Mul<i64> for InputExpr<E1, E2> {
+    type Output = MulExpr<InputExpr<E1, E2>, ConstExpr>;
+
+    fn mul(self, rhs: i64) -> MulExpr<InputExpr<E1, E2>, ConstExpr> {
+        MulExpr { e1: Box::new(self), e2: Box::new(ConstExpr { v: rhs }) }
+    }
+}
+
+impl<E1: Eval, E2: Eval> Mul<InputExpr<E1, E2>> for i64 {
+    type Output = MulExpr<InputExpr<E1, E2>, ConstExpr>;
+
+    fn mul(self, rhs: InputExpr<E1, E2>) -> MulExpr<InputExpr<E1, E2>, ConstExpr> {
+        MulExpr { e1: Box::new(rhs), e2: Box::new(ConstExpr { v: self }) }
+    }
+}
+
+
 #[derive(Debug)]
 struct Function<E: Eval> {
     e: E
 }
 
 impl<E: Eval> Function<E> {
+    // TODO chaining
+
     pub fn new<F, E1: Eval, E2: Eval>(gen: F) -> Self
         where F : Fn(VarRef, VarRef, &Fn(E1, E2) -> InputExpr<E1, E2>) -> E,
     {
@@ -177,29 +213,26 @@ fn test_shift_one() {
     raw.push(255);
 
     let img: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_raw(2, 2, raw).unwrap();
+    let out = shift_one.eval_on(img);
 
-    // let out = interpret(&shift_one, img);
-
-    // let raw = out.into_raw();
-    // assert!(raw.len() == 4);
-    // assert!(raw[0] == 0);
-    // assert!(raw[1] == 0);
-    // assert!(raw[2] == 0);
-    // assert!(raw[3] == 200);
+    let raw = out.into_raw();
+    println!("{:?}", raw);
+    assert!(raw.len() == 4);
+    assert!(raw[0] == 0);
+    assert!(raw[1] == 0);
+    assert!(raw[2] == 0);
+    assert!(raw[3] == 200);
 }
 
 fn main() {
-    // let k = [[-1, 0, 1],
-    //          [-2, 0, 2],
-    //          [-1, 0, 1]];
+    let id = Function::new(|x, y, input| {
+        input(x - 10, y)
+    });
 
-    // let sobel_x = gen_apply_3x3_kernel(k);
+    let inpt = image::open(&Path::new("in1.png")).unwrap();
 
-    // let inpt = image::open(&Path::new("in1.png")).unwrap();
-    // let _ = inpt.clone().to_luma().save("out_luma.png");
+    let out = id.eval_on(inpt.to_luma());
 
-    // let out = interpret(&sobel_x, inpt.to_luma());
-
-    // let ref mut fout = File::create(&Path::new("out.png")).unwrap();
-    // let _ = image::ImageLuma8(out).save(fout, image::PNG);
+    let ref mut fout = File::create(&Path::new("out.png")).unwrap();
+    let _ = image::ImageLuma8(out).save(fout, image::PNG);
 }
