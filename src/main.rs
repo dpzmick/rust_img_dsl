@@ -1,3 +1,4 @@
+#![feature(unboxed_closures)]
 extern crate image;
 
 use std::ops::Add;
@@ -344,12 +345,16 @@ impl Inputable for Function1 {
 
 impl Function1 {
     pub fn new<F>(inpt: Box<Inputable>, gen: F) -> Self
-        where F: Fn(VarRef, VarRef, usize) -> Box<Eval>
+        where F: Fn(VarRef, VarRef, &Fn(Box<Eval>, Box<Eval>) -> InputExpr) -> Box<Eval>
     {
         let x = VarRef {v: Var::X};
         let y = VarRef {v: Var::Y};
 
-        let e = gen(x, y, 0);
+        let input = |x, y| {
+            InputExpr {id: 0, x: x, y: y }
+        };
+
+        let e = gen(x, y, &input);
 
         Function1 { e: e, input: inpt }
     }
@@ -373,11 +378,7 @@ impl Function1 {
     }
 
     pub fn gen_3x3_kernel(inpt: Box<Inputable>, k: [[i64; 3]; 3]) -> Self {
-        Function1::new(inpt, |x, y, id| {
-            let input = |x, y| {
-                InputExpr {id: id, x: x, y: y }
-            };
-
+        Function1::new(inpt, |x, y, input| {
             let e =
                   (input(Box::new(x - 1), Box::new(y - 1)) * k[0][0])
                 + (input(Box::new(x - 1), Box::new(y + 0)) * k[1][0])
@@ -426,12 +427,25 @@ impl Inputable for Function2 {
 
 impl Function2 {
     pub fn new<F>(input1: Box<Inputable>, input2: Box<Inputable>, gen: F) -> Self
-        where F: Fn(VarRef, VarRef, usize, usize) -> Box<Eval>
+        where F: Fn(
+            VarRef,
+            VarRef,
+            &Fn(Box<Eval>, Box<Eval>) -> InputExpr,
+            &Fn(Box<Eval>, Box<Eval>) -> InputExpr)
+        -> Box<Eval>
     {
         let x = VarRef {v: Var::X};
         let y = VarRef {v: Var::Y};
 
-        let e = gen(x, y, 0, 1);
+        let i1 = |x, y| {
+            InputExpr {id: 0, x: x, y: y }
+        };
+
+        let i2 = |x, y| {
+            InputExpr {id: 1, x: x, y: y }
+        };
+
+        let e = gen(x, y, &i1, &i2);
 
         Function2 { e: e, input1: input1, input2: input2 }
     }
@@ -472,7 +486,7 @@ fn test_id() {
     let img: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_raw(2, 2, raw).unwrap();
 
     let id = Function1::new(Box::new(img), |x, y, input| {
-        Box::new(InputExpr {id: input, x: Box::new(x), y: Box::new(y) })
+        Box::new(input(Box::new(x), Box::new(y)))
     });
 
     let out = id.eval();
@@ -495,10 +509,9 @@ fn test_shift_one() {
     let img: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_raw(2, 2, raw).unwrap();
 
     let shift_one = Function1::new(Box::new(img), |x, y, input| {
-        let xx = x - 1;
-
-        Box::new(InputExpr { id: input, x: Box::new(xx), y: Box::new(y) })
+        Box::new(input(Box::new(x - 1), Box::new(y)))
     });
+
     let out = shift_one.eval();
 
     let raw = out.into_raw();
@@ -555,15 +568,7 @@ fn main() {
 
     let sobel_y = Function1::gen_3x3_kernel(Box::new(inpt.to_luma()), sobel_y);
 
-    let grad = Function2::new(Box::new(sobel_x), Box::new(sobel_y), |x, y, i1, i2| {
-        let input1 = |x, y| {
-            InputExpr {id: i1, x: x, y: y }
-        };
-
-        let input2 = |x, y| {
-            InputExpr {id: i2, x: x, y: y }
-        };
-
+    let grad = Function2::new(Box::new(sobel_x), Box::new(sobel_y), |x, y, input1, input2| {
         let t1 = input1(Box::new(x), Box::new(y)) * input1(Box::new(x), Box::new(y));
         let t2 = input2(Box::new(x), Box::new(y)) * input2(Box::new(x), Box::new(y));
 
