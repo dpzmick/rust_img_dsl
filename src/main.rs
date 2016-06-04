@@ -1,4 +1,7 @@
 #![feature(unboxed_closures)]
+#![feature(fn_traits)]
+#![feature(slice_patterns)]
+
 extern crate image;
 extern crate llvm;
 
@@ -484,106 +487,153 @@ fn test_inpt_expr() {
     assert!(0 == e.eval(env, &vec![&inpt]));
 }
 
-struct Function1 {
-    input: Box<Inputable>,
-    e:     Box<Expr>
+macro_rules! make_input(
+    ($name:ident, $number:expr) => (
+            fn $name<E1: Expr + 'static, E2: Expr + 'static>(x: E1, y: E2) -> InputExpr {
+                InputExpr {id: $number, x: Box::new(x), y: Box::new(y) }
+            }
+        );
+    );
+
+struct InputBuilder { id: usize }
+
+impl InputBuilder {
+    pub fn build<E1: Expr + 'static, E2: Expr + 'static>(&self)
+        -> fn(E1, E2) -> InputExpr
+        {
+            match self.id {
+                0 => {
+                    make_input!(input, 0);
+                    input
+                },
+                1 => {
+                    make_input!(input, 1);
+                    input
+                }
+                _ => unimplemented!()
+            }
+        }
 }
 
-impl Inputable for Function1 {
-    fn at(&self, x: i64, y: i64) -> i64 {
-        if x < 0 || x >= self.input.width() {
-            return 0
-        }
-
-        if y < 0 || y >= self.input.height() {
-            return 0
-        }
-
-        let env = FunctionEnv {x: x, y: y};
-        let inpts = vec![&*self.input];
-        self.e.eval(env, &inpts)
-    }
-
-    fn width(&self) -> i64 {
-        self.input.width()
-    }
-
-    fn height(&self) -> i64 {
-        self.input.height()
-    }
-
-    fn compile<'a>(&self, module: &'a llvm::CSemiBox<'a, llvm::Module>) -> &'a llvm::Function {
-        // compile all the inputs
-        let input = self.input.compile(&module);
-
-        let context = module.get_context();
-
-        let ftype = llvm::Type::get::<fn(i64, i64) -> (i64)>(&context);
-        let f = module.add_function("function1", ftype);
-        f.add_attribute(llvm::Attribute::AlwaysInline);
-        let entry = f.append("entry");
-
-        let builder = llvm::Builder::new(&context);
-
-        builder.position_at_end(entry);
-        let e = self.e.compile(&f[0], &f[1], &context, module, &builder, &vec![input]);
-        builder.build_ret(e);
-
-        f
+impl<E1: Expr + 'static, E2: Expr + 'static> Fn<(E1, E2)> for InputBuilder {
+    extern "rust-call" fn call(&self, args: (E1, E2)) -> InputExpr {
+        let (a1, a2) = args;
+        self.build()(a1, a2)
     }
 }
 
-impl Function1 {
-    pub fn new<F>(inpt: Box<Inputable>, gen: F) -> Self
-        where F: Fn(VarRef, VarRef, &Fn(Box<Expr>, Box<Expr>) -> InputExpr) -> Box<Expr>
+impl<E1: Expr + 'static, E2: Expr + 'static> FnMut<(E1, E2)> for InputBuilder {
+    extern "rust-call" fn call_mut(&mut self, args: (E1, E2)) -> InputExpr {
+        let (a1, a2) = args;
+        self.build()(a1, a2)
+    }
+}
+
+impl<E1: Expr + 'static, E2: Expr + 'static> FnOnce<(E1, E2)> for InputBuilder {
+    type Output = InputExpr;
+    extern "rust-call" fn call_once(self, args: (E1, E2)) -> InputExpr {
+        let (a1, a2) = args;
+        self.build()(a1, a2)
+    }
+}
+
+struct Function {
+    num_inputs: usize,
+    e:          Box<Expr>
+}
+
+impl Function {
+    pub fn new<F, E: Expr + 'static>(num_inputs: usize, gen: F) -> Self
+        where F: Fn(VarRef, VarRef, &[InputBuilder]) -> E
     {
         let x = VarRef {v: Var::X};
         let y = VarRef {v: Var::Y};
 
-        let input = |x, y| {
-            InputExpr {id: 0, x: x, y: y }
-        };
+        let b = InputBuilder { id: 0 };
+        let e = gen(x, y, &[b]);
 
-        let e = gen(x, y, &input);
-
-        Function1 { e: e, input: inpt }
+        Function { e: Box::new(e), num_inputs: num_inputs }
     }
 
-    pub fn eval(&self) -> ImageBuffer<Luma<u8>, Vec<u8>> {
-        let xbound = self.input.width();
-        let ybound = self.input.height();
+    // pub fn eval(&self) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    //     let xbound = self.input.width();
+    //     let ybound = self.input.height();
 
-        let mut out = ImageBuffer::new(xbound as u32, ybound as u32);
+    //     let mut out = ImageBuffer::new(xbound as u32, ybound as u32);
 
-        for x in 0..xbound {
-            for y in 0..ybound {
-                let v = self.at(x, y);
-                let v = if v > 255 { 255 } else if v < 0 { 0 } else { v } as u8;
-                let p = Luma::from_channels(v, 255, 255, 255);
-                out.put_pixel(x as u32, y as u32, p);
-            }
-        }
+    //     for x in 0..xbound {
+    //         for y in 0..ybound {
+    //             let v = self.at(x, y);
+    //             let v = if v > 255 { 255 } else if v < 0 { 0 } else { v } as u8;
+    //             let p = Luma::from_channels(v, 255, 255, 255);
+    //             out.put_pixel(x as u32, y as u32, p);
+    //         }
+    //     }
 
-        out
-    }
+    //     out
+    // }
 
     pub fn gen_3x3_kernel(inpt: Box<Inputable>, k: [[i64; 3]; 3]) -> Self {
-        Function1::new(inpt, |x, y, input| {
-            let e =
-                  (input(Box::new(x - 1), Box::new(y - 1)) * k[0][0])
-                + (input(Box::new(x - 1), Box::new(y + 0)) * k[1][0])
-                + (input(Box::new(x - 1), Box::new(y + 1)) * k[2][0])
-                + (input(Box::new(x + 0), Box::new(y - 1)) * k[0][1])
-                + (input(Box::new(x + 0), Box::new(y + 0)) * k[1][1])
-                + (input(Box::new(x + 0), Box::new(y + 1)) * k[2][1])
-                + (input(Box::new(x + 1), Box::new(y - 1)) * k[0][2])
-                + (input(Box::new(x + 1), Box::new(y + 0)) * k[1][2])
-                + (input(Box::new(x + 1), Box::new(y + 1)) * k[2][2]);
+        Function::new(1, |x, y, inputs| {
+            let ref input = inputs[0];
 
-            Box::new(e)
+              (input(x - 1, y - 1) * k[0][0])
+            + (input(x - 1, y    ) * k[1][0])
+            + (input(x - 1, y + 1) * k[2][0])
+            + (input(x    , y - 1) * k[0][1])
+            + (input(x    , y    ) * k[1][1])
+            + (input(x    , y + 1) * k[2][1])
+            + (input(x + 1, y - 1) * k[0][2])
+            + (input(x + 1, y    ) * k[1][2])
+            + (input(x + 1, y + 1) * k[2][2])
         })
     }
 }
+
+// impl Inputable for Function1 {
+//     fn at(&self, x: i64, y: i64) -> i64 {
+//         if x < 0 || x >= self.input.width() {
+//             return 0
+//         }
+
+//         if y < 0 || y >= self.input.height() {
+//             return 0
+//         }
+
+//         let env = FunctionEnv {x: x, y: y};
+//         let inpts = vec![&*self.input];
+//         self.e.eval(env, &inpts)
+//     }
+
+//     fn width(&self) -> i64 {
+//         self.input.width()
+//     }
+
+//     fn height(&self) -> i64 {
+//         self.input.height()
+//     }
+
+//     fn compile<'a>(&self, module: &'a llvm::CSemiBox<'a, llvm::Module>) -> &'a llvm::Function {
+//         // compile all the inputs
+//         let input = self.input.compile(&module);
+
+//         let context = module.get_context();
+
+//         let ftype = llvm::Type::get::<fn(i64, i64) -> (i64)>(&context);
+//         let f = module.add_function("function1", ftype);
+//         f.add_attribute(llvm::Attribute::AlwaysInline);
+//         let entry = f.append("entry");
+
+//         let builder = llvm::Builder::new(&context);
+
+//         builder.position_at_end(entry);
+//         let e = self.e.compile(&f[0], &f[1], &context, module, &builder, &vec![input]);
+//         builder.build_ret(e);
+
+//         f
+//     }
+// }
+
 
 struct Function2 {
     input1: Box<Inputable>,
@@ -638,28 +688,18 @@ impl Inputable for Function2 {
 }
 
 impl Function2 {
-    pub fn new<F>(input1: Box<Inputable>, input2: Box<Inputable>, gen: F) -> Self
-        where F: Fn(
-            VarRef,
-            VarRef,
-            &Fn(Box<Expr>, Box<Expr>) -> InputExpr,
-            &Fn(Box<Expr>, Box<Expr>) -> InputExpr)
-        -> Box<Expr>
+    pub fn new<E: Expr + 'static, F>(input1: Box<Inputable>, input2: Box<Inputable>, gen: F) -> Self
+        where F: Fn(VarRef, VarRef, InputBuilder, InputBuilder) -> E
     {
         let x = VarRef {v: Var::X};
         let y = VarRef {v: Var::Y};
 
-        let i1 = |x, y| {
-            InputExpr {id: 0, x: x, y: y }
-        };
+        let i1 = InputBuilder { id: 0 };
+        let i2 = InputBuilder { id: 1 };
 
-        let i2 = |x, y| {
-            InputExpr {id: 1, x: x, y: y }
-        };
+        let e = gen(x, y, i1, i2);
 
-        let e = gen(x, y, &i1, &i2);
-
-        Function2 { e: e, input1: input1, input2: input2 }
+        Function2 { e: Box::new(e), input1: input1, input2: input2 }
     }
 
     pub fn eval(&self) -> ImageBuffer<Luma<u8>, Vec<u8>> {
@@ -845,9 +885,7 @@ fn test_id() {
 
     let img: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_raw(2, 2, raw).unwrap();
 
-    let id = Function1::new(Box::new(img), |x, y, input| {
-        Box::new(input(Box::new(x), Box::new(y)))
-    });
+    let id = Function1::new(Box::new(img), |x, y, input| { input(x, y) });
 
     let out = id.eval();
 
@@ -869,7 +907,7 @@ fn test_shift_one() {
     let img: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_raw(2, 2, raw).unwrap();
 
     let shift_one = Function1::new(Box::new(img), |x, y, input| {
-        Box::new(input(Box::new(x - 1), Box::new(y)))
+        input(x - 1, y)
     });
 
     let out = shift_one.eval();
@@ -914,31 +952,29 @@ fn test_simple_sobel() {
 }
 
 fn main() {
-    let inpt = image::open(&Path::new("in1.png")).unwrap();
+    // let inpt = image::open(&Path::new("in1.png")).unwrap();
 
-    let sobel_x = [[-1, 0, 1],
-                   [-2, 0, 2],
-                   [-1, 0, 1]];
+    // let sobel_x = [[-1, 0, 1],
+    //                [-2, 0, 2],
+    //                [-1, 0, 1]];
 
-    let sobel_x = Function1::gen_3x3_kernel(Box::new(inpt.to_luma()), sobel_x);
+    // let sobel_x = Function1::gen_3x3_kernel(Box::new(inpt.to_luma()), sobel_x);
 
-    let sobel_y = [[-1, -2, -1],
-                   [ 0,  0,  0],
-                   [ 1,  2,  1]];
+    // let sobel_y = [[-1, -2, -1],
+    //                [ 0,  0,  0],
+    //                [ 1,  2,  1]];
 
-    let sobel_y = Function1::gen_3x3_kernel(Box::new(inpt.to_luma()), sobel_y);
+    // let sobel_y = Function1::gen_3x3_kernel(Box::new(inpt.to_luma()), sobel_y);
 
-    let grad = Function2::new(Box::new(sobel_x), Box::new(sobel_y), |x, y, input1, input2| {
-        let t1 = input1(Box::new(x), Box::new(y)) * input1(Box::new(x), Box::new(y));
-        let t2 = input2(Box::new(x), Box::new(y)) * input2(Box::new(x), Box::new(y));
+    // let grad = Function2::new(Box::new(sobel_x), Box::new(sobel_y), |x, y, input1, input2| {
+    //     let t1 = input1(x, y) * input1(x, y);
+    //     let t2 = input2(x, y) * input2(x, y);
 
-        Box::new(SqrtExpr { x: Box::new(t1 + t2) })
-    });
+    //     SqrtExpr { x: Box::new(t1 + t2) }
+    // });
 
-    let out = run_jit(&grad);
+    // let out = run_jit(&grad);
 
-    // let out = grad.eval();
-
-    let ref mut fout = File::create(&Path::new("out.png")).unwrap();
-    let _ = image::ImageLuma8(out).save(fout, image::PNG);
+    // let ref mut fout = File::create(&Path::new("out.png")).unwrap();
+    // let _ = image::ImageLuma8(out).save(fout, image::PNG);
 }
