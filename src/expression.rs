@@ -21,12 +21,6 @@ pub trait Expr: Debug {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct FunctionEnv {
-    x: i64,
-    y: i64
-}
-
-#[derive(Debug, Clone, Copy)]
 pub enum Var { X, Y }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +38,6 @@ pub struct VarRef<'a> {
 #[derive(Debug)]
 pub struct InputExpr<'a> { id: usize, x: Box<Expr + 'a>, y: Box<Expr + 'a> }
 
-// TODO use a macro to generate these
 #[derive(Debug)]
 pub struct MulExpr<'a> { e1: Box<Expr + 'a>, e2: Box<Expr + 'a> }
 
