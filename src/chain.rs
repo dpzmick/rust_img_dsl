@@ -1,130 +1,191 @@
+use std::mem;
+
 use function::*;
 use Img;
+use image::ImageBuffer;
 
 use llvm;
 use llvm::GetContext;
 use llvm::Compile;
+use llvm::JitOptions;
+use llvm::JitEngine;
+use llvm::ExecutionEngine;
+
+static mut source_count: i64 = 0;
 
 // whatever let it be pub WHO CARES
 pub enum ChainLink<'a> {
-    ImageSource(&'a Img),
+    ImageSource(i64),
     Linked(Vec<&'a ChainLink<'a>>, &'a Function <'a>)
 }
 
 impl<'a> ChainLink<'a> {
-    pub fn image_source(img: &'a Img) -> Self {
-        ChainLink::ImageSource(img)
+    /// creates a unique image source
+    pub fn create_image_source() -> Self {
+        let v = unsafe {
+            source_count += 1;
+            source_count
+        };
+
+        ChainLink::ImageSource(v)
     }
 
     pub fn link(inputs: Vec<&'a ChainLink>, to: &'a Function<'a>) -> Self {
-        // TODO check that all inputs have the same dimensions
         ChainLink::Linked(inputs.to_vec(), to)
     }
 
-    /// the emitted module will use the provided images, therefore lifetime must be same as
-    /// lifetime of the images
-    pub fn compile(&self) -> llvm::CSemiBox<'a, llvm::Module> {
+    pub fn compile(&self) -> CompiledChain<'a> {
         let c = unsafe {
             llvm::Context::get_global()
         };
 
-        let module = llvm::Module::new("jitmodule", c);
+        // read the core module
+        let module = llvm::Module::parse_bitcode(c, "./core.bc").unwrap();
+
         {
-            let topfunc = self.compile_into(&module);
+            let builder = llvm::Builder::new(&c);
+
+            // pull out the already defined function
+            let function = module.get_function("function").unwrap();
+            let ft = function.get_signature();
+            function.add_attribute(llvm::Attribute::AlwaysInline);
+
+            let entry = function.append("entry");
+            builder.position_at_end(entry);
+
+            // compile the chain into the module
+            let ftocall = self.compile_into(&module, &ft);
+
+            // call the new chain from function
+            let x          = &function[0];
+            let y          = &function[1];
+            let inputs     = &function[2];
+            let num_inputs = &function[3];
+
+            let ret = builder.build_call(ftocall, &[x, y, inputs, num_inputs]);
+            builder.build_ret(ret);
+
+            // TODO optimize better
+            // module.optimize(3, 1024*4);
         }
-        module
+
+        CompiledChain { module: module }
     }
 
-    fn compile_into(&self, module: &'a llvm::CSemiBox<'a, llvm::Module>) -> &'a llvm::Function {
+    fn compile_into(&self, module: &'a llvm::CSemiBox<'a, llvm::Module>, ft: &'a llvm::Type)
+        -> &'a llvm::Function
+    {
         match self {
-            &ChainLink::ImageSource(img) => compile_image_to_llvm_function(module, img),
+            &ChainLink::ImageSource(idx) =>
+                compile_image_src_to_llvm_function(module, idx, ft),
+
             &ChainLink::Linked(ref links, ref func) => {
-                let funs = links.iter().map(|f| f.compile_into(module)).collect();
-                compile_function_to_llvm_function(module, func, &funs)
-            }
-        }
-    }
-
-    fn width(&self) -> i64 {
-        match self {
-            &ChainLink::ImageSource(img) => img.width() as i64,
-            &ChainLink::Linked(ref links, _) => {
-                links[0].width()
-            }
-        }
-    }
-
-    fn height(&self) -> i64 {
-        match self {
-            &ChainLink::ImageSource(img) => img.height() as i64,
-            &ChainLink::Linked(ref links, _) => {
-                links[0].height()
+                let funs = links.iter().map(|f| f.compile_into(module, ft)).collect();
+                compile_function_to_llvm_function(module, func, ft, &funs)
             }
         }
     }
 }
 
-/// helper function which finds or adds a function in/to an llvm module which will access a single
-/// pixel of a rust image
-/// TODO find existing function
-fn compile_image_to_llvm_function<'a>(module: &'a llvm::CSemiBox<'a, llvm::Module>,
-                                      img: &'a Img)
+// create a function that will call the core function with the appropriate index
+fn compile_image_src_to_llvm_function<'a>(module: &'a llvm::CSemiBox<'a, llvm::Module>,
+                                          idx: i64,
+                                          ft: &'a llvm::Type)
     -> &'a llvm::Function
 {
     let context = module.get_context();
     let builder = llvm::Builder::new(&context);
 
-    let ft = llvm::Type::get::<fn(i64, i64) -> i64>(module.get_context());
     let f = module.add_function("image_source", ft);
     f.add_attribute(llvm::Attribute::AlwaysInline);
 
     let entry = f.append("entry");
     builder.position_at_end(entry);
 
-    let x = &f[0];
-    let y = &f[1];
-    let w = (img.width() as i64).compile(&context);
+    let x          = &f[0];
+    let y          = &f[1];
+    let inputs     = &f[2];
+    let num_inputs = &f[3];
 
-    let offset = builder.build_mul(w, y);
-    let offset = builder.build_add(offset, x);
+    let idx = idx.compile(context);
 
-    let ty0 = llvm::Type::get::<i8>(&context);
-    let ty1 = llvm::Type::new_pointer(ty0);
-
-    let ptr = (img.as_ptr() as u64).compile(&context);
-    let ptr = builder.build_int_to_ptr(ptr, ty1);
-    let ptr = builder.build_gep(ptr, &[offset]);
-    let e = builder.build_load(ptr);
-
-    let e = builder.build_zext(e, llvm::Type::get::<i64>(&context));
-    builder.build_ret(e);
+    let core_f = module.get_function("core_input_at").unwrap();
+    let res = builder.build_call(core_f, &[x, y, inputs, num_inputs, idx]);
+    builder.build_ret(res);
 
     f
 }
 
+// pass in the function type that should be used
 fn compile_function_to_llvm_function<'a>(module: &'a llvm::CSemiBox<'a, llvm::Module>,
                                          func: &'a Function,
-                                         inputs: &Vec<&'a llvm::Function>)
+                                         ft: &'a llvm::Type,
+                                         fun_inputs: &Vec<&'a llvm::Function>)
     -> &'a llvm::Function
 {
     let context = module.get_context();
     let builder = llvm::Builder::new(&context);
 
-    let ft = llvm::Type::get::<fn(i64, i64) -> i64>(module.get_context());
-    let f = module.add_function("function", ft); // totally unreadable
+    let f = module.add_function("compiled_fn", ft);
     f.add_attribute(llvm::Attribute::AlwaysInline);
 
     let entry = f.append("entry");
     builder.position_at_end(entry);
 
-    let x = &f[0];
-    let y = &f[1];
+    let x          = &f[0];
+    let y          = &f[1];
+    let inputs     = &f[2];
+    let num_inputs = &f[3];
 
     let e = func.get_expr();
-    let e = e.compile(x, y, context, module, &*builder, inputs);
+    let e = e.compile(x, y, inputs, num_inputs, context, module, &*builder, fun_inputs);
     builder.build_ret(e);
 
     f
+}
+
+pub struct CompiledChain<'a> {
+    pub module: llvm::CSemiBox<'a, llvm::Module>
+}
+
+impl<'a> CompiledChain<'a> {
+    /// will fail with assertion failure if inputs not all same dimensions
+    pub fn run_on(&self, inputs: &[&Img]) -> Img {
+        assert!(inputs.len() >= 1);
+
+        let dim = inputs[0].dimensions();
+
+        for &i in inputs {
+            assert!(i.dimensions() == dim);
+        }
+
+        let out = ImageBuffer::new(dim.0, dim.1);
+
+        // call some llvm functions to get some llvm values
+        // such a mess of types someone get me off of this wild ride
+        let opts = JitOptions {opt_level: 3};
+        let engine = JitEngine::new(&self.module, opts).unwrap();
+
+        let outptr = out.as_ptr() as *const i8;
+
+        let inptsptrs: Vec<*const i8> = inputs.iter().map(|i| i.as_ptr() as *const i8).collect();
+
+        let jitfunction = engine.find_function("jitfunction").unwrap();
+        engine.with_function(jitfunction,
+                             |f: extern fn((i64, i64, *const i8, i64, u64))-> () | {
+
+            // the llvm-rs crate doesn't actually work, have to cast the function it gives us to
+            // one of the correct type
+            let f: fn(i64, i64, *const i8, i64, u64) -> ()
+                = unsafe { mem::transmute(f) };
+
+            let width: i64  = out.width() as i64;
+            let height: i64 = out.height() as i64;
+            f(width, height, outptr, inptsptrs.as_ptr() as i64, inputs.len() as u64);
+        });
+
+        out
+    }
 }
 
 // compilation strategy: one function per Function. each function (x,y) -> result

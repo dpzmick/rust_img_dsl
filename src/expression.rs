@@ -7,16 +7,18 @@ use std::marker::PhantomData;
 
 use llvm;
 use llvm::Compile;
-use llvm::GetContext;
 
 pub trait Expr: Debug {
+    // this is complicated little beast
     fn compile<'a>(&self,
                    x: &'a llvm::Value,
                    y: &'a llvm::Value,
+                   image_inputs: &'a llvm::Value,
+                   num_inputs: &'a llvm::Value,
                    context: &'a llvm::Context,
                    module: &'a llvm::CSemiBox<'a, llvm::Module>,
                    builder: &'a llvm::Builder,
-                   inputs: &Vec<&'a llvm::Function>)
+                   function_inputs: &Vec<&'a llvm::Function>)
         -> &'a llvm::Value;
 }
 
@@ -73,6 +75,8 @@ impl<'a> Expr for ConstExpr<'a> {
     fn compile<'b>(&self,
                    _: &'b llvm::Value,
                    _: &'b llvm::Value,
+                   _: &'b llvm::Value,
+                   _: &'b llvm::Value,
                    context: &'b llvm::Context,
                    _: &'b llvm::CSemiBox<'b, llvm::Module>,
                    _: &'b llvm::Builder,
@@ -87,6 +91,8 @@ impl<'a> Expr for VarRef<'a> {
     fn compile<'b>(&self,
                    x: &'b llvm::Value,
                    y: &'b llvm::Value,
+                   _: &'b llvm::Value,
+                   _: &'b llvm::Value,
                    _: &'b llvm::Context,
                    _: &'b llvm::CSemiBox<'b, llvm::Module>,
                    _: &'b llvm::Builder,
@@ -104,14 +110,20 @@ impl<'a> Expr for AddExpr<'a> {
     fn compile<'b>(&self,
                    x: &'b llvm::Value,
                    y: &'b llvm::Value,
+                   inputs: &'b llvm::Value,
+                   num_inputs: &'b llvm::Value,
                    context: &'b llvm::Context,
                    module: &'b llvm::CSemiBox<'b, llvm::Module>,
                    builder: &'b llvm::Builder,
-                   inputs: &Vec<&'b llvm::Function>)
+                   function_inputs: &Vec<&'b llvm::Function>)
         -> &'b llvm::Value
     {
-        let v1 = self.e1.compile(x, y, context, module, builder, inputs);
-        let v2 = self.e2.compile(x, y, context, module, builder, inputs);
+        let v1 = self.e1.compile(x, y, inputs, num_inputs,
+                                 context, module, builder, function_inputs);
+
+        let v2 = self.e2.compile(x, y, inputs, num_inputs,
+                                 context, module, builder, function_inputs);
+
         builder.build_add(v1, v2)
     }
 }
@@ -120,14 +132,20 @@ impl<'a> Expr for MulExpr<'a> {
     fn compile<'b>(&self,
                    x: &'b llvm::Value,
                    y: &'b llvm::Value,
+                   inputs: &'b llvm::Value,
+                   num_inputs: &'b llvm::Value,
                    context: &'b llvm::Context,
                    module: &'b llvm::CSemiBox<'b, llvm::Module>,
                    builder: &'b llvm::Builder,
-                   inputs: &Vec<&'b llvm::Function>)
+                   function_inputs: &Vec<&'b llvm::Function>)
         -> &'b llvm::Value
     {
-        let v1 = self.e1.compile(x, y, context, module, builder, inputs);
-        let v2 = self.e2.compile(x, y, context, module, builder, inputs);
+        let v1 = self.e1.compile(x, y, inputs, num_inputs,
+                                 context, module, builder, function_inputs);
+
+        let v2 = self.e2.compile(x, y, inputs, num_inputs,
+                                 context, module, builder, function_inputs);
+
         builder.build_mul(v1, v2)
     }
 }
@@ -136,48 +154,20 @@ impl<'a> Expr for SqrtExpr<'a> {
     fn compile<'b>(&self,
                    x: &'b llvm::Value,
                    y: &'b llvm::Value,
-                   _: &'b llvm::Context,
+                   inputs: &'b llvm::Value,
+                   num_inputs: &'b llvm::Value,
+                   context: &'b llvm::Context,
                    module: &'b llvm::CSemiBox<'b, llvm::Module>,
                    builder: &'b llvm::Builder,
-                   inputs: &Vec<&'b llvm::Function>)
+                   function_inputs: &Vec<&'b llvm::Function>)
         -> &'b llvm::Value
     {
-        let context = module.get_context();
-
-        let ftype = llvm::Type::get::<fn(i64) -> (i64)>(context);
-        let f = module.add_function("sqrt", ftype);
-        f.add_attribute(llvm::Attribute::AlwaysInline);
-        let entry     = f.append("entry");
-        let loop_cond = f.append("loop_cond");
-        let loop_body = f.append("loop_body");
-        let exit      = f.append("exit");
-
-        let builder2 = llvm::Builder::new(&context);
-
-        builder2.position_at_end(entry);
-        let tmp = builder2.build_alloca(llvm::Type::get::<i64>(context));
-        let one = 1i64.compile(context);
-        builder2.build_store(one, tmp);
-        builder2.build_br(loop_cond);
-
-        builder2.position_at_end(loop_cond);
-        let val = builder2.build_load(tmp);
-        let val = builder2.build_mul(val, val);
-        let cmp = builder2.build_cmp(val, &f[0], llvm::Predicate::LessThan);
-        builder2.build_cond_br(cmp, loop_body, Some(exit));
-
-        builder2.position_at_end(loop_body);
-        let val = builder2.build_load(tmp);
-        let inc = builder2.build_add(val, 1i64.compile(&context));
-        builder2.build_store(inc, tmp);
-        builder2.build_br(loop_cond);
-
-        builder2.position_at_end(exit);
-        let val = builder2.build_load(tmp);
-        builder2.build_ret(val);
+        let f = module.get_function("core_isqrt").unwrap();
 
         // expression
-        let v = self.x.compile(x, y, context, module, builder, inputs);
+        let v = self.x.compile(x, y, inputs, num_inputs,
+                               context, module, builder, function_inputs);
+
         builder.build_call(f, &[v])
     }
 }
@@ -186,15 +176,22 @@ impl<'a> Expr for InputExpr<'a> {
     fn compile<'b>(&self,
                    x: &'b llvm::Value,
                    y: &'b llvm::Value,
+                   inputs: &'b llvm::Value,
+                   num_inputs: &'b llvm::Value,
                    context: &'b llvm::Context,
                    module: &'b llvm::CSemiBox<'b, llvm::Module>,
                    builder: &'b llvm::Builder,
-                   inputs: &Vec<&'b llvm::Function>)
+                   function_inputs: &Vec<&'b llvm::Function>)
         -> &'b llvm::Value
     {
-        let x = self.x.compile(x, y, context, module, builder, inputs);
-        let y = self.y.compile(x, y, context, module, builder, inputs);
-        builder.build_call(inputs[self.id], &[x, y])
+        let x = self.x.compile(x, y, inputs, num_inputs,
+                               context, module, builder, function_inputs);
+
+        let y = self.y.compile(x, y, inputs, num_inputs,
+                               context, module, builder, function_inputs);
+
+        let f = function_inputs[self.id];
+        builder.build_call(f, &[x, y, inputs, num_inputs])
     }
 }
 

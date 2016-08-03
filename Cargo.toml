@@ -6,6 +6,7 @@ authors = ["David Zmick <dpzmick@gmail.com>"]
 [dependencies]
 image = "*"
 num = "0.1"
+llvm-alt = "0.5.0"
 
-[dependencies.llvm-alt]
-path = "../llvm-rs"
+# [dependencies.llvm-alt]
+# path = "../llvm-rs"
