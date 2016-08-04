@@ -64,10 +64,9 @@ impl<'a> ChainLink<'a> {
 
             let ret = builder.build_call(ftocall, &[x, y, inputs, num_inputs]);
             builder.build_ret(ret);
-
-            // TODO optimize better
-            // module.optimize(3, 1024*4);
         }
+
+        module.optimize(3, 0);
 
         CompiledChain { module: module }
     }
