@@ -1,187 +1,254 @@
-use std::mem;
-
-use function::*;
 use Img;
+use function::*;
+
 use image::ImageBuffer;
 
-use llvm;
-use llvm::GetContext;
-use llvm::Compile;
-use llvm::JitOptions;
-use llvm::JitEngine;
-use llvm::ExecutionEngine;
+use llvm::analysis::*;
+use llvm::bit_reader::*;
+use llvm::core::*;
+use llvm::execution_engine::*;
+use llvm::prelude::*;
+use llvm::transforms::pass_manager_builder::*;
+use llvm::transforms::ipo::*;
+use llvm::target::*;
+use llvm::*;
 
-static mut source_count: i64 = 0;
+use std::mem;
+// use std::ffi::CStr;
 
-// whatever let it be pub WHO CARES
 pub enum ChainLink<'a> {
     ImageSource(i64),
     Linked(Vec<&'a ChainLink<'a>>, &'a Function <'a>)
 }
 
 impl<'a> ChainLink<'a> {
-    /// creates a unique image source
-    pub fn create_image_source() -> Self {
-        let v = unsafe {
-            source_count += 1;
-            source_count
-        };
-
-        ChainLink::ImageSource(v)
-    }
-
     pub fn link(inputs: Vec<&'a ChainLink>, to: &'a Function<'a>) -> Self {
         ChainLink::Linked(inputs.to_vec(), to)
     }
 
-    pub fn compile(&self) -> CompiledChain<'a> {
-        let c = unsafe {
-            llvm::Context::get_global()
-        };
+    pub fn compile(&self) -> CompiledChain {
+        unsafe {
+            let context = LLVMGetGlobalContext();
 
-        // read the core module
-        let module = llvm::Module::parse_bitcode(c, "./core.bc").unwrap();
+            let mut mem_buffer = mem::uninitialized();
+            let err            = mem::zeroed();
 
-        {
-            let builder = llvm::Builder::new(&c);
+            let res = LLVMCreateMemoryBufferWithContentsOfFile(
+                b"./core.bc".as_ptr() as *const _,
+                &mut mem_buffer,
+                err);
+            assert!(res == 0);
 
-            // pull out the already defined function
-            let function = module.get_function("function").unwrap();
-            let ft = function.get_signature();
-            function.add_attribute(llvm::Attribute::AlwaysInline);
+            let mut module = mem::uninitialized();
+            let res = LLVMParseBitcodeInContext(
+                context,
+                mem_buffer,
+                &mut module,
+                err);
+            assert!(res == 0);
+            LLVMDisposeMemoryBuffer(mem_buffer);
 
-            let entry = function.append("entry");
-            builder.position_at_end(entry);
+            let builder = LLVMCreateBuilderInContext(context);
 
-            // compile the chain into the module
-            let ftocall = self.compile_into(&module, &ft);
+            // get the predefined function out of the module
+            let function = LLVMGetNamedFunction(module, b"function\0".as_ptr() as *const _);
 
-            // call the new chain from function
-            let x          = &function[0];
-            let y          = &function[1];
-            let inputs     = &function[2];
-            let num_inputs = &function[3];
+            let bb = LLVMAppendBasicBlockInContext(
+                context,
+                function,
+                b"entry\0".as_ptr() as *const _);
 
-            let ret = builder.build_call(ftocall, &[x, y, inputs, num_inputs]);
-            builder.build_ret(ret);
+            LLVMPositionBuilderAtEnd(builder, bb);
+
+            // compile the function and
+            let ft = LLVMTypeOf(function);
+            let ft = LLVMGetElementType(ft);
+            let ftocall = self.compile_into(module, ft);
+
+            let x          = LLVMGetParam(function, 0);
+            let y          = LLVMGetParam(function, 1);
+            let inputs     = LLVMGetParam(function, 2);
+            let num_inputs = LLVMGetParam(function, 3);
+
+            let mut args = [x, y, inputs, num_inputs];
+
+            let res  = LLVMBuildCall(
+                builder,
+                ftocall,
+                args.as_mut_ptr(),
+                args.len() as ::libc::c_uint,
+                b"call\0".as_ptr() as *const _);
+
+            LLVMBuildRet(builder, res);
+
+            // for every function, add the inline always attribute
+            let mut fun = LLVMGetFirstFunction(module);
+            while !fun.is_null() {
+                // println!("adding always inline to function {}",
+                //        CStr::from_ptr(LLVMGetValueName(fun)).to_str().unwrap());
+
+                LLVMAddFunctionAttr(fun, LLVMAlwaysInlineAttribute);
+                fun = LLVMGetNextFunction(fun);
+            }
+
+            // LLVMPrintModuleToFile(module, b"out_preopt.ll\0".as_ptr() as *const _, err);
+            // LLVMVerifyModule(module, LLVMVerifierFailureAction::LLVMAbortProcessAction, err);
+
+            // optimize the module
+            let builder = LLVMPassManagerBuilderCreate();
+            LLVMPassManagerBuilderSetOptLevel(builder, 3 as ::libc::c_uint);
+            LLVMPassManagerBuilderSetSizeLevel(builder, 0 as ::libc::c_uint);
+
+            let pass_manager = LLVMCreatePassManager();
+            // we can use the always inline pass because everything is marked alwaysinline
+            // LLVMPassManagerBuilderUseInlinerWithThreshold(builder, 3 as ::libc::c_uint);
+            LLVMAddAlwaysInlinerPass(pass_manager);
+            LLVMPassManagerBuilderPopulateModulePassManager(builder, pass_manager);
+            LLVMPassManagerBuilderDispose(builder);
+            LLVMRunPassManager(pass_manager, module);
+
+            // LLVMPrintModuleToFile(module, b"out_postop.ll\0".as_ptr() as *const _, err);
+            // LLVMVerifyModule(module, LLVMVerifierFailureAction::LLVMAbortProcessAction, err);
+
+            // create a MCJIT execution engine
+            LLVMLinkInMCJIT();
+            assert!(0 == LLVM_InitializeNativeTarget());
+            assert!(0 == LLVM_InitializeNativeAsmPrinter());
+
+            // takes ownership of module
+            let mut ee = mem::uninitialized();
+            LLVMCreateExecutionEngineForModule(&mut ee, module, err);
+            // TODO check for err
+
+            CompiledChain { engine: ee }
         }
-
-        module.optimize(3, 0);
-
-        CompiledChain { module: module }
     }
 
-    fn compile_into(&self, module: &'a llvm::CSemiBox<'a, llvm::Module>, ft: &'a llvm::Type)
-        -> &'a llvm::Function
+    fn compile_into(&self, module: LLVMModuleRef, ft: LLVMTypeRef) -> LLVMValueRef
     {
         match self {
             &ChainLink::ImageSource(idx) =>
-                compile_image_src_to_llvm_function(module, idx, ft),
+                unsafe { compile_image_src_to_llvm_function(module, idx, ft) },
 
             &ChainLink::Linked(ref links, ref func) => {
                 let funs = links.iter().map(|f| f.compile_into(module, ft)).collect();
-                compile_function_to_llvm_function(module, func, ft, &funs)
+                unsafe { compile_function_to_llvm_function(module, func, ft, &funs) }
             }
         }
     }
 }
 
 // create a function that will call the core function with the appropriate index
-fn compile_image_src_to_llvm_function<'a>(module: &'a llvm::CSemiBox<'a, llvm::Module>,
-                                          idx: i64,
-                                          ft: &'a llvm::Type)
-    -> &'a llvm::Function
+unsafe fn compile_image_src_to_llvm_function(
+    module: LLVMModuleRef,
+    idx: i64,
+    ft: LLVMTypeRef) -> LLVMValueRef
 {
-    let context = module.get_context();
-    let builder = llvm::Builder::new(&context);
+    let context = LLVMGetModuleContext(module);
+    let builder = LLVMCreateBuilderInContext(context);
+    let f = LLVMAddFunction(module, b"image_source\0".as_ptr() as *const _, ft);
 
-    let f = module.add_function("image_source", ft);
-    f.add_attribute(llvm::Attribute::AlwaysInline);
+    let bb = LLVMAppendBasicBlockInContext(
+        context,
+        f,
+        b"entry\0".as_ptr() as *const _);
 
-    let entry = f.append("entry");
-    builder.position_at_end(entry);
+    LLVMPositionBuilderAtEnd(builder, bb);
 
-    let x          = &f[0];
-    let y          = &f[1];
-    let inputs     = &f[2];
-    let num_inputs = &f[3];
+    let x          = LLVMGetParam(f, 0);
+    let y          = LLVMGetParam(f, 1);
+    let inputs     = LLVMGetParam(f, 2);
+    let num_inputs = LLVMGetParam(f, 3);
 
-    let idx = idx.compile(context);
+    // get type of idx
+    let idx = LLVMConstInt(
+        LLVMInt64TypeInContext(context),
+        idx as ::libc::c_ulonglong,
+        1);
 
-    let core_f = module.get_function("core_input_at").unwrap();
-    let res = builder.build_call(core_f, &[x, y, inputs, num_inputs, idx]);
-    builder.build_ret(res);
+    let core_f = LLVMGetNamedFunction(module, b"core_input_at\0".as_ptr() as *const _);
+    assert!(core_f as usize != 0);
+
+    let mut args = [x, y, inputs, num_inputs, idx];
+
+    let res  = LLVMBuildCall(
+        builder,
+        core_f,
+        args.as_mut_ptr(),
+        args.len() as ::libc::c_uint,
+        b"call\0".as_ptr() as *const _);
+
+    let _    = LLVMBuildRet(builder, res);
 
     f
 }
 
 // pass in the function type that should be used
-fn compile_function_to_llvm_function<'a>(module: &'a llvm::CSemiBox<'a, llvm::Module>,
-                                         func: &'a Function,
-                                         ft: &'a llvm::Type,
-                                         fun_inputs: &Vec<&'a llvm::Function>)
-    -> &'a llvm::Function
+unsafe fn compile_function_to_llvm_function<'a>(
+    module: LLVMModuleRef,
+    func: &'a Function,
+    ft: LLVMTypeRef,
+    fun_inputs: &Vec<LLVMValueRef>) -> LLVMValueRef
 {
-    let context = module.get_context();
-    let builder = llvm::Builder::new(&context);
+    let context = LLVMGetModuleContext(module);
+    let builder = LLVMCreateBuilderInContext(context);
 
-    let f = module.add_function("compiled_fn", ft);
-    f.add_attribute(llvm::Attribute::AlwaysInline);
+    let f = LLVMAddFunction(module, b"compiled_fn\0".as_ptr() as *const _, ft);
 
-    let entry = f.append("entry");
-    builder.position_at_end(entry);
+    let bb = LLVMAppendBasicBlockInContext(
+        context,
+        f,
+        b"entry\0".as_ptr() as *const _);
 
-    let x          = &f[0];
-    let y          = &f[1];
-    let inputs     = &f[2];
-    let num_inputs = &f[3];
+    LLVMPositionBuilderAtEnd(builder, bb);
+
+    let x          = LLVMGetParam(f, 0);
+    let y          = LLVMGetParam(f, 1);
+    let inputs     = LLVMGetParam(f, 2);
+    let num_inputs = LLVMGetParam(f, 3);
 
     let e = func.get_expr();
-    let e = e.compile(x, y, inputs, num_inputs, context, module, &*builder, fun_inputs);
-    builder.build_ret(e);
+    let e = e.compile(x, y, inputs, num_inputs, context, module, builder, fun_inputs);
+
+    LLVMBuildRet(builder, e);
 
     f
 }
 
-pub struct CompiledChain<'a> {
-    pub module: llvm::CSemiBox<'a, llvm::Module>
+/// holds a compiled chain
+/// this actually holds an llvm execution engine eagerly waiting to execute your jit compiled
+/// function
+pub struct CompiledChain {
+    pub engine: LLVMExecutionEngineRef
 }
+// TODO implement drop
 
-impl<'a> CompiledChain<'a> {
+impl CompiledChain {
     /// will fail with assertion failure if inputs not all same dimensions
     pub fn run_on(&self, inputs: &[&Img]) -> Img {
         assert!(inputs.len() >= 1);
 
         let dim = inputs[0].dimensions();
 
-        for &i in inputs {
-            assert!(i.dimensions() == dim);
-        }
+        // for &i in inputs {
+        //     assert!(i.dimensions() == dim);
+        // }
 
         let out = ImageBuffer::new(dim.0, dim.1);
-
-        // call some llvm functions to get some llvm values
-        // such a mess of types someone get me off of this wild ride
-        let opts = JitOptions {opt_level: 3};
-        let engine = JitEngine::new(&self.module, opts).unwrap();
-
         let outptr = out.as_ptr() as *const i8;
 
-        let inptsptrs: Vec<*const i8> = inputs.iter().map(|i| i.as_ptr() as *const i8).collect();
+        let inptsptrs: Vec<*const i8>
+            = inputs.iter().map(|i| i.as_ptr() as *const i8).collect();
 
-        let jitfunction = engine.find_function("jitfunction").unwrap();
-        engine.with_function(jitfunction,
-                             |f: extern fn((i64, i64, *const i8, i64, u64))-> () | {
+        // pretend everything is const, but we know it actually isn't :)
+        let func: fn(i64, i64, *const i8, *const *const i8, u64) -> () = unsafe {
+            let f = LLVMGetFunctionAddress(self.engine, b"jitfunction\0".as_ptr() as *const _);
+            mem::transmute(f)
+        };
 
-            // the llvm-rs crate doesn't actually work, have to cast the function it gives us to
-            // one of the correct type
-            let f: fn(i64, i64, *const i8, i64, u64) -> ()
-                = unsafe { mem::transmute(f) };
-
-            let width: i64  = out.width() as i64;
-            let height: i64 = out.height() as i64;
-            f(width, height, outptr, inptsptrs.as_ptr() as i64, inputs.len() as u64);
-        });
+        let width: i64  = out.width() as i64;
+        let height: i64 = out.height() as i64;
+        func(width, height, outptr, inptsptrs.as_ptr(), inputs.len() as u64);
 
         out
     }

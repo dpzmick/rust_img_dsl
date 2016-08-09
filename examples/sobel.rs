@@ -1,12 +1,17 @@
-extern crate image;
 extern crate rust_img;
-
-use std::fs::File;
-use std::path::Path;
+extern crate image;
 
 use rust_img::*;
 
+use std::fs;
+use std::fs::File;
+use std::path::Path;
+
+use std::time::Instant;
+
 fn main() {
+    let now = Instant::now();
+
     let sobel_x = [[-1, 0, 1],
                    [-2, 0, 2],
                    [-1, 0, 1]];
@@ -29,21 +34,39 @@ fn main() {
     });
 
     // create a unique image source
-    // each one of these will represent a different input to the final compiled function
-    // TODO simplify interface, figure out input ids and whatnot
-    // let image = ChainLink::create_image_source();
+    // this image source will be index 0 in the arguments array passed to run_on
     let image = ChainLink::ImageSource(0);
 
     let c1 = ChainLink::link(vec![&image], &sobel_x);
     let c2 = ChainLink::link(vec![&image], &sobel_y);
     let c3 = ChainLink::link(vec![&c1, &c2], &grad);
 
+    let elapsed = now.elapsed();
+    println!("construction\t{}", elapsed.as_secs()*(10e9 as u64) + elapsed.subsec_nanos() as u64);
+
+    let now = Instant::now();
+
     // compile the function
     let cc = c3.compile();
 
-    let luma = image::open(&Path::new("in1.png")).unwrap().to_luma();
-    let out = cc.run_on(&[&luma]);
+    let elapsed = now.elapsed();
+    println!("compiliation\t{}", elapsed.as_secs()*(10e9 as u64) + elapsed.subsec_nanos() as u64);
 
-    let ref mut fout = File::create(&Path::new("out.png")).unwrap();
-    let _ = image::ImageLuma8(out).save(fout, image::PNG);
+    let paths = fs::read_dir("images").unwrap();
+    for path in paths {
+        let path = path.unwrap().path();
+        let luma = image::open(&path).unwrap().to_luma();
+
+        let now = Instant::now();
+        let out = cc.run_on(&[&luma]);
+        let elapsed = now.elapsed();
+
+        println!("{:?}\t{}",
+                 path.file_name().unwrap(),
+                 elapsed.as_secs()*(10e9 as u64) + elapsed.subsec_nanos() as u64);
+
+        let op = Path::new("out_jit").join(path.file_name().unwrap());
+        let ref mut fout = File::create(&op).unwrap();
+        let _ = image::ImageLuma8(out).save(fout, image::PNG);
+    }
 }

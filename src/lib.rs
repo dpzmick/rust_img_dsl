@@ -1,7 +1,8 @@
 #![feature(unboxed_closures)]
 
-extern crate llvm;
+extern crate llvm_sys as llvm;
 extern crate image;
+extern crate libc;
 
 use image::Luma;
 use image::ImageBuffer;

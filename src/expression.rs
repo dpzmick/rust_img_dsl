@@ -1,3 +1,6 @@
+use llvm::core::*;
+use llvm::prelude::*;
+
 use std::fmt::Debug;
 use std::ops::Add;
 use std::ops::Mul;
@@ -5,21 +8,18 @@ use std::ops::Sub;
 
 use std::marker::PhantomData;
 
-use llvm;
-use llvm::Compile;
-
 pub trait Expr: Debug {
     // this is complicated little beast
-    fn compile<'a>(&self,
-                   x: &'a llvm::Value,
-                   y: &'a llvm::Value,
-                   image_inputs: &'a llvm::Value,
-                   num_inputs: &'a llvm::Value,
-                   context: &'a llvm::Context,
-                   module: &'a llvm::CSemiBox<'a, llvm::Module>,
-                   builder: &'a llvm::Builder,
-                   function_inputs: &Vec<&'a llvm::Function>)
-        -> &'a llvm::Value;
+    unsafe fn compile(&self,
+                      x:            LLVMValueRef,
+                      y:            LLVMValueRef,
+                      image_inputs: LLVMValueRef,
+                      num_inputs:   LLVMValueRef,
+                      context:      LLVMContextRef,
+                      module:       LLVMModuleRef,
+                      builder:      LLVMBuilderRef,
+                      function_inputs: &Vec<LLVMValueRef>)
+        -> LLVMValueRef;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,32 +72,35 @@ impl<'a> SqrtExpr<'a> {
 }
 
 impl<'a> Expr for ConstExpr<'a> {
-    fn compile<'b>(&self,
-                   _: &'b llvm::Value,
-                   _: &'b llvm::Value,
-                   _: &'b llvm::Value,
-                   _: &'b llvm::Value,
-                   context: &'b llvm::Context,
-                   _: &'b llvm::CSemiBox<'b, llvm::Module>,
-                   _: &'b llvm::Builder,
-                   _: &Vec<&'b llvm::Function>)
-        -> &'b llvm::Value
+    unsafe fn compile(&self,
+                      _:       LLVMValueRef,
+                      _:       LLVMValueRef,
+                      _:       LLVMValueRef,
+                      _:       LLVMValueRef,
+                      context: LLVMContextRef,
+                      _:       LLVMModuleRef,
+                      _:       LLVMBuilderRef,
+                      _:       &Vec<LLVMValueRef>)
+        -> LLVMValueRef
     {
-        self.v.compile(context)
+        LLVMConstInt(
+            LLVMInt64TypeInContext(context),
+            self.v as ::libc::c_ulonglong,
+            1)
     }
 }
 
 impl<'a> Expr for VarRef<'a> {
-    fn compile<'b>(&self,
-                   x: &'b llvm::Value,
-                   y: &'b llvm::Value,
-                   _: &'b llvm::Value,
-                   _: &'b llvm::Value,
-                   _: &'b llvm::Context,
-                   _: &'b llvm::CSemiBox<'b, llvm::Module>,
-                   _: &'b llvm::Builder,
-                   _: &Vec<&'b llvm::Function>)
-        -> &'b llvm::Value
+    unsafe fn compile(&self,
+                      x: LLVMValueRef,
+                      y: LLVMValueRef,
+                      _: LLVMValueRef,
+                      _: LLVMValueRef,
+                      _: LLVMContextRef,
+                      _: LLVMModuleRef,
+                      _: LLVMBuilderRef,
+                      _: &Vec<LLVMValueRef>)
+        -> LLVMValueRef
     {
         match self.v {
             Var::X => x,
@@ -107,91 +110,103 @@ impl<'a> Expr for VarRef<'a> {
 }
 
 impl<'a> Expr for AddExpr<'a> {
-    fn compile<'b>(&self,
-                   x: &'b llvm::Value,
-                   y: &'b llvm::Value,
-                   inputs: &'b llvm::Value,
-                   num_inputs: &'b llvm::Value,
-                   context: &'b llvm::Context,
-                   module: &'b llvm::CSemiBox<'b, llvm::Module>,
-                   builder: &'b llvm::Builder,
-                   function_inputs: &Vec<&'b llvm::Function>)
-        -> &'b llvm::Value
+    unsafe fn compile(&self,
+                      x:            LLVMValueRef,
+                      y:            LLVMValueRef,
+                      image_inputs: LLVMValueRef,
+                      num_inputs:   LLVMValueRef,
+                      context:      LLVMContextRef,
+                      module:       LLVMModuleRef,
+                      builder:      LLVMBuilderRef,
+                      function_inputs: &Vec<LLVMValueRef>)
+        -> LLVMValueRef
     {
-        let v1 = self.e1.compile(x, y, inputs, num_inputs,
-                                 context, module, builder, function_inputs);
+        let v1 = self.e1.compile(
+            x, y, image_inputs, num_inputs, context, module, builder, function_inputs);
 
-        let v2 = self.e2.compile(x, y, inputs, num_inputs,
-                                 context, module, builder, function_inputs);
+        let v2 = self.e2.compile(
+            x, y, image_inputs, num_inputs, context, module, builder, function_inputs);
 
-        builder.build_add(v1, v2)
+        LLVMBuildAdd(builder, v1, v2, b"add\0".as_ptr() as *const _)
     }
 }
 
 impl<'a> Expr for MulExpr<'a> {
-    fn compile<'b>(&self,
-                   x: &'b llvm::Value,
-                   y: &'b llvm::Value,
-                   inputs: &'b llvm::Value,
-                   num_inputs: &'b llvm::Value,
-                   context: &'b llvm::Context,
-                   module: &'b llvm::CSemiBox<'b, llvm::Module>,
-                   builder: &'b llvm::Builder,
-                   function_inputs: &Vec<&'b llvm::Function>)
-        -> &'b llvm::Value
+    unsafe fn compile(&self,
+                      x:            LLVMValueRef,
+                      y:            LLVMValueRef,
+                      image_inputs: LLVMValueRef,
+                      num_inputs:   LLVMValueRef,
+                      context:      LLVMContextRef,
+                      module:       LLVMModuleRef,
+                      builder:      LLVMBuilderRef,
+                      function_inputs: &Vec<LLVMValueRef>)
+        -> LLVMValueRef
     {
-        let v1 = self.e1.compile(x, y, inputs, num_inputs,
-                                 context, module, builder, function_inputs);
+        let v1 = self.e1.compile(
+            x, y, image_inputs, num_inputs, context, module, builder, function_inputs);
 
-        let v2 = self.e2.compile(x, y, inputs, num_inputs,
-                                 context, module, builder, function_inputs);
+        let v2 = self.e2.compile(
+            x, y, image_inputs, num_inputs, context, module, builder, function_inputs);
 
-        builder.build_mul(v1, v2)
+        LLVMBuildMul(builder, v1, v2, b"mul\0".as_ptr() as *const _)
     }
 }
 
 impl<'a> Expr for SqrtExpr<'a> {
-    fn compile<'b>(&self,
-                   x: &'b llvm::Value,
-                   y: &'b llvm::Value,
-                   inputs: &'b llvm::Value,
-                   num_inputs: &'b llvm::Value,
-                   context: &'b llvm::Context,
-                   module: &'b llvm::CSemiBox<'b, llvm::Module>,
-                   builder: &'b llvm::Builder,
-                   function_inputs: &Vec<&'b llvm::Function>)
-        -> &'b llvm::Value
+    unsafe fn compile(&self,
+                      x:            LLVMValueRef,
+                      y:            LLVMValueRef,
+                      image_inputs: LLVMValueRef,
+                      num_inputs:   LLVMValueRef,
+                      context:      LLVMContextRef,
+                      module:       LLVMModuleRef,
+                      builder:      LLVMBuilderRef,
+                      function_inputs: &Vec<LLVMValueRef>)
+        -> LLVMValueRef
     {
-        let f = module.get_function("core_isqrt").unwrap();
+        let function = LLVMGetNamedFunction(module, b"core_isqrt\0".as_ptr() as *const _);
 
         // expression
-        let v = self.x.compile(x, y, inputs, num_inputs,
-                               context, module, builder, function_inputs);
+        let val = self.x.compile(
+            x, y, image_inputs, num_inputs, context, module, builder, function_inputs);
 
-        builder.build_call(f, &[v])
+        let mut args = [val];
+        LLVMBuildCall(
+            builder,
+            function,
+            args.as_mut_ptr(),
+            args.len() as ::libc::c_uint,
+            b"call\0".as_ptr() as *const _)
     }
 }
 
 impl<'a> Expr for InputExpr<'a> {
-    fn compile<'b>(&self,
-                   x: &'b llvm::Value,
-                   y: &'b llvm::Value,
-                   inputs: &'b llvm::Value,
-                   num_inputs: &'b llvm::Value,
-                   context: &'b llvm::Context,
-                   module: &'b llvm::CSemiBox<'b, llvm::Module>,
-                   builder: &'b llvm::Builder,
-                   function_inputs: &Vec<&'b llvm::Function>)
-        -> &'b llvm::Value
+    unsafe fn compile(&self,
+                      x:            LLVMValueRef,
+                      y:            LLVMValueRef,
+                      image_inputs: LLVMValueRef,
+                      num_inputs:   LLVMValueRef,
+                      context:      LLVMContextRef,
+                      module:       LLVMModuleRef,
+                      builder:      LLVMBuilderRef,
+                      function_inputs: &Vec<LLVMValueRef>)
+        -> LLVMValueRef
     {
-        let x = self.x.compile(x, y, inputs, num_inputs,
-                               context, module, builder, function_inputs);
+        let x = self.x.compile(
+            x, y, image_inputs, num_inputs, context, module, builder, function_inputs);
 
-        let y = self.y.compile(x, y, inputs, num_inputs,
-                               context, module, builder, function_inputs);
+        let y = self.y.compile(
+            x, y, image_inputs, num_inputs, context, module, builder, function_inputs);
 
         let f = function_inputs[self.id];
-        builder.build_call(f, &[x, y, inputs, num_inputs])
+        let mut args = [x, y, image_inputs, num_inputs];
+        LLVMBuildCall(
+            builder,
+            f,
+            args.as_mut_ptr(),
+            args.len() as ::libc::c_uint,
+            b"call\0".as_ptr() as *const _)
     }
 }
 
