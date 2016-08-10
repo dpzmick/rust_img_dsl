@@ -50,7 +50,7 @@ fn main() {
     let cc = c3.compile();
 
     let elapsed = now.elapsed();
-    println!("compiliation\t{}", elapsed.as_secs()*(10e9 as u64) + elapsed.subsec_nanos() as u64);
+    println!("compilation\t{}", elapsed.as_secs()*(10e9 as u64) + elapsed.subsec_nanos() as u64);
 
     let paths = fs::read_dir("images").unwrap();
     for path in paths {
