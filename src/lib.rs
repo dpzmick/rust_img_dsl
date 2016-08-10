@@ -1,5 +1,3 @@
-#![feature(unboxed_closures)]
-
 extern crate llvm_sys as llvm;
 extern crate image;
 extern crate libc;
